@@ -6,23 +6,29 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY
 );
 
-// GET - Fetch all inventory items
-export async function GET() {
+// GET - Fetch inventory items by type (optional)
+export async function GET(request) {
   try {
-    const { data, error } = await supabase
-      .from('inventory')
-      .select('*')
-      .order('created_at', { ascending: false });
+    const { searchParams } = new URL(request.url);
+    const type = searchParams.get('type');
 
-    if (error) {
-      console.error('Supabase error:', error);
-      return NextResponse.json({ error: error.message }, { status: 500 });
+    let query = supabase
+      .from('inventory')
+      .select('item_id, item_name, item_type, item_images, item_price, created_at')
+      .order('item_name', { ascending: true });
+
+    // If type is specified, filter by type
+    if (type) {
+      query = query.eq('item_type', type);
     }
 
-    return NextResponse.json({ items: data || [] });
-  } catch (err) {
-    console.error('Error:', err);
-    return NextResponse.json({ error: 'Failed to fetch inventory' }, { status: 500 });
+    const { data: items, error } = await query;
+
+    if (error) throw error;
+    return NextResponse.json({ items });
+  } catch (error) {
+    console.error('Error fetching inventory items:', error);
+    return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }
 
@@ -30,95 +36,116 @@ export async function GET() {
 export async function POST(request) {
   try {
     const formData = await request.formData();
-    const itemName = formData.get('item_name');
-    const itemType = formData.get('item_type');
-    const itemPrice = parseInt(formData.get('item_price')) || 0;
-    
-    // Generate unique item_id
-    const itemId = `${itemType}_${Date.now()}`;
-    
-    // Upload images based on item_type
-    const itemImages = {};
-    
-    if (itemType === 'dice') {
-      // Dice needs: idle, dice1-6, frame_01-15 (22 images total)
-      const diceKeys = [
-        'idle',
-        'dice1', 'dice2', 'dice3', 'dice4', 'dice5', 'dice6',
-        'frame_01', 'frame_02', 'frame_03', 'frame_04', 'frame_05',
-        'frame_06', 'frame_07', 'frame_08', 'frame_09', 'frame_10',
-        'frame_11', 'frame_12', 'frame_13', 'frame_14', 'frame_15'
-      ];
-      
-      for (const key of diceKeys) {
-        const file = formData.get(key);
-        if (file && file.size > 0) {
-          const fileName = `dice/${itemId}/${key}.png`;
-          const { error: uploadError } = await supabase.storage
-            .from('items')
-            .upload(fileName, file, { contentType: file.type, upsert: true });
-          
-          if (uploadError) throw uploadError;
-          
-          const { data: { publicUrl } } = supabase.storage.from('items').getPublicUrl(fileName);
-          itemImages[key] = publicUrl;
-        }
-      }
-    } else if (itemType === 'token') {
-      // Token needs 6 color images
-      const colors = ['red', 'blue', 'green', 'yellow', 'purple', 'orange'];
-      for (const color of colors) {
-        const file = formData.get(color);
-        if (file && file.size > 0) {
-          const fileName = `tokens/${itemId}/${color}.png`;
-          const { error: uploadError } = await supabase.storage
-            .from('items')
-            .upload(fileName, file, { contentType: file.type, upsert: true });
-          
-          if (uploadError) throw uploadError;
-          
-          const { data: { publicUrl } } = supabase.storage.from('items').getPublicUrl(fileName);
-          itemImages[color] = publicUrl;
-        }
-      }
-    } else if (itemType === 'board') {
-      // Board needs 1 image
-      const file = formData.get('board');
+    const item_name = formData.get('item_name');
+    const item_type = formData.get('item_type');
+    const item_price = parseInt(formData.get('item_price'));
+
+    console.log('Creating inventory item:', { item_name, item_type, item_price });
+
+    if (!item_name || !item_type || isNaN(item_price)) {
+      return NextResponse.json({ 
+        error: 'Missing or invalid required fields',
+        received: { item_name, item_type, item_price }
+      }, { status: 400 });
+    }
+
+    // Generate a unique item_id (needed for file naming)
+    const item_id = `${item_type}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+    // Handle image uploads to Supabase Storage
+    const item_images = {};
+    const imageKeys = ['idle', 'dice1', 'dice2', 'dice3', 'dice4', 'dice5', 'dice6',
+      'frame_01', 'frame_02', 'frame_03', 'frame_04', 'frame_05', 'frame_06',
+      'frame_07', 'frame_08', 'frame_09', 'frame_10', 'frame_11', 'frame_12',
+      'frame_13', 'frame_14', 'frame_15', 'red', 'blue', 'green', 'yellow',
+      'purple', 'orange', '4playerBoard', '5playerBoard', '6playerBoard'];
+
+    // Upload each image file to Supabase Storage
+    for (const key of imageKeys) {
+      const file = formData.get(key);
       if (file && file.size > 0) {
-        const fileName = `boards/${itemId}/board.png`;
-        const { error: uploadError } = await supabase.storage
-          .from('items')
-          .upload(fileName, file, { contentType: file.type, upsert: true });
-        
-        if (uploadError) throw uploadError;
-        
-        const { data: { publicUrl } } = supabase.storage.from('items').getPublicUrl(fileName);
-        itemImages.board = publicUrl;
+        try {
+          // Convert file to buffer
+          const fileBuffer = await file.arrayBuffer();
+          const fileName = `${item_id}_${key}.${file.name.split('.').pop()}`;
+          // Use existing folder structure: boards, dice, tokens
+          let folderName;
+          if (item_type === 'board') folderName = 'boards';
+          else if (item_type === 'dice') folderName = 'dice';
+          else if (item_type === 'token') folderName = 'tokens';
+          else folderName = item_type; // fallback
+          
+          const filePath = `${folderName}/${fileName}`;
+
+          console.log(`Uploading ${key} to ${filePath}`);
+
+          // Upload to Supabase Storage
+          const { data: uploadData, error: uploadError } = await supabase.storage
+            .from('items')
+            .upload(filePath, fileBuffer, {
+              contentType: file.type,
+              upsert: true
+            });
+
+          if (uploadError) {
+            console.error(`Upload error for ${key}:`, uploadError);
+            throw new Error(`Failed to upload ${key}: ${uploadError.message}`);
+          }
+
+          // Get public URL
+          const { data: urlData } = supabase.storage
+            .from('items')
+            .getPublicUrl(filePath);
+
+          item_images[key] = urlData.publicUrl;
+          console.log(`Successfully uploaded ${key}: ${urlData.publicUrl}`);
+
+        } catch (uploadError) {
+          console.error(`Error uploading ${key}:`, uploadError);
+          throw new Error(`Failed to upload image ${key}: ${uploadError.message}`);
+        }
       }
     }
 
-    // Insert into inventory table
-    const { data, error } = await supabase
+    console.log('Image files uploaded:', Object.keys(item_images));
+
+    // Check if at least one image was uploaded
+    if (Object.keys(item_images).length === 0) {
+      return NextResponse.json({ 
+        error: 'At least one image is required for the inventory item'
+      }, { status: 400 });
+    }
+
+    const insertData = {
+      item_id,
+      item_name,
+      item_type,
+      item_price,
+      item_images
+    };
+
+    console.log('Inserting data:', insertData);
+
+    // Insert into database
+    const { data: item, error } = await supabase
       .from('inventory')
-      .insert({
-        item_id: itemId,
-        item_name: itemName,
-        item_type: itemType,
-        item_images: itemImages,
-        item_price: itemPrice,
-      })
+      .insert(insertData)
       .select()
       .single();
 
     if (error) {
-      console.error('Insert error:', error);
-      return NextResponse.json({ error: error.message }, { status: 500 });
+      console.error('Supabase error:', error);
+      throw error;
     }
 
-    return NextResponse.json({ item: data });
-  } catch (err) {
-    console.error('Error:', err);
-    return NextResponse.json({ error: 'Failed to create item' }, { status: 500 });
+    console.log('Item created successfully:', item);
+    return NextResponse.json({ item });
+  } catch (error) {
+    console.error('Error creating inventory item:', error);
+    return NextResponse.json({ 
+      error: error.message,
+      details: error.details || 'No additional details'
+    }, { status: 500 });
   }
 }
 
@@ -127,17 +154,19 @@ export async function DELETE(request) {
   try {
     const { itemId } = await request.json();
 
+    if (!itemId) {
+      return NextResponse.json({ error: 'Item ID is required' }, { status: 400 });
+    }
+
     const { error } = await supabase
       .from('inventory')
       .delete()
       .eq('item_id', itemId);
 
-    if (error) {
-      return NextResponse.json({ error: error.message }, { status: 500 });
-    }
-
+    if (error) throw error;
     return NextResponse.json({ success: true });
-  } catch (err) {
-    return NextResponse.json({ error: 'Failed to delete item' }, { status: 500 });
+  } catch (error) {
+    console.error('Error deleting inventory item:', error);
+    return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }

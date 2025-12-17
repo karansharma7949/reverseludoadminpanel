@@ -14,7 +14,7 @@ const ITEM_TYPES = {
     ] 
   },
   token: { name: 'Token', images: ['red', 'blue', 'green', 'yellow', 'purple', 'orange'] },
-  board: { name: 'Board', images: ['board'] },
+  board: { name: 'Board', images: ['4playerBoard', '5playerBoard', '6playerBoard'] },
 };
 
 export default function InventoryPage() {
@@ -159,12 +159,30 @@ export default function InventoryPage() {
                 
                 {/* Preview Images */}
                 <div className="flex flex-wrap gap-2 mb-3">
-                  {item.item_images && Object.entries(item.item_images).slice(0, 4).map(([key, url]) => (
-                    <img key={key} src={url} alt={key} className="w-12 h-12 rounded-lg object-cover bg-gray-700" />
-                  ))}
-                  {item.item_images && Object.keys(item.item_images).length > 4 && (
+                  {item.item_images && (() => {
+                    // For board items, show 4playerBoard as main preview
+                    if (item.item_type === 'board' && item.item_images['4playerBoard']) {
+                      return (
+                        <img 
+                          src={item.item_images['4playerBoard']} 
+                          alt="4playerBoard" 
+                          className="w-12 h-12 rounded-lg object-cover bg-gray-700" 
+                        />
+                      );
+                    }
+                    // For other items, show first 4 images
+                    return Object.entries(item.item_images).slice(0, 4).map(([key, url]) => (
+                      <img key={key} src={url} alt={key} className="w-12 h-12 rounded-lg object-cover bg-gray-700" />
+                    ));
+                  })()}
+                  {item.item_images && Object.keys(item.item_images).length > 4 && item.item_type !== 'board' && (
                     <div className="w-12 h-12 rounded-lg bg-gray-700 flex items-center justify-center text-gray-400 text-xs">
                       +{Object.keys(item.item_images).length - 4}
+                    </div>
+                  )}
+                  {item.item_images && item.item_type === 'board' && Object.keys(item.item_images).length > 1 && (
+                    <div className="w-12 h-12 rounded-lg bg-gray-700 flex items-center justify-center text-gray-400 text-xs">
+                      +{Object.keys(item.item_images).length - 1}
                     </div>
                   )}
                 </div>
@@ -208,7 +226,7 @@ export default function InventoryPage() {
                   className="w-full px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-purple-500">
                   <option value="dice">Dice (22 images: idle, dice1-6, frame_01-15)</option>
                   <option value="token">Token (6 color images)</option>
-                  <option value="board">Board (1 image)</option>
+                  <option value="board">Board (3 images: 4playerBoard, 5playerBoard, 6playerBoard)</option>
                 </select>
               </div>
 
@@ -224,6 +242,11 @@ export default function InventoryPage() {
                 <label className="block text-sm font-medium text-gray-300 mb-3">
                   Upload Images ({ITEM_TYPES[formData.item_type]?.name} - {requiredImages.length} required)
                 </label>
+                {formData.item_type === 'board' && (
+                  <p className="text-sm text-gray-400 mb-3">
+                    Upload board images for different player modes. The 4-player board will be used as the preview image.
+                  </p>
+                )}
                 <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
                   {requiredImages.map((imgKey) => (
                     <div key={imgKey} className="relative">
@@ -236,7 +259,11 @@ export default function InventoryPage() {
                               <svg className="w-8 h-8 mx-auto text-gray-500 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
                               </svg>
-                              <span className="text-gray-400 text-xs">{imgKey}</span>
+                              <span className="text-gray-400 text-xs">
+                                {formData.item_type === 'board' && imgKey.includes('player') 
+                                  ? imgKey.replace('playerBoard', ' Player') 
+                                  : imgKey}
+                              </span>
                             </div>
                           )}
                         </div>
