@@ -4,291 +4,270 @@ import { useState, useEffect, useRef } from 'react';
 import { supabase } from '@/lib/supabase';
 
 export default function TournamentPage() {
-  const [tournaments, setTournaments] = useState([]);
+  const [tournament, setTournament] = useState(null);
+  const [leaderboard, setLeaderboard] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState('all');
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
-  const [showParticipantsModal, setShowParticipantsModal] = useState(false);
-  const [showStatsModal, setShowStatsModal] = useState(false);
-  const [selectedTournament, setSelectedTournament] = useState(null);
-  const [participants, setParticipants] = useState([]);
-  const [searchTerm, setSearchTerm] = useState('');
-  const [stats, setStats] = useState({ total: 0, upcoming: 0, running: 0, completed: 0, totalPrize: 0, totalParticipants: 0 });
-  const [uploading, setUploading] = useState({ icon: false, reward: false });
-
-  const iconInputRef = useRef(null);
-  const rewardInputRef = useRef(null);
-
-  const [formData, setFormData] = useState({
-    tournament_name: '',
-    tournament_id: '',
-    tournament_icon: '',
-    reward_type: 'coins',
-    reward_amount: 0,
-    reward_description: '',
-    reward_image: '',
-    tournament_starting_time: '',
-    tournament_end_date: '',
-    entry_fee: 0,
-    max_players: 8,
-    status: 'upcoming'
+  const [showLeaderboardModal, setShowLeaderboardModal] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [stats, setStats] = useState({ 
+    totalEntries: 0, 
+    totalPlayers: 0, 
+    avgScore: 0, 
+    topScore: 0 
   });
 
-  useEffect(() => { fetchTournaments(); }, []);
+  const bannerInputRef = useRef(null);
 
-  const fetchTournaments = async () => {
+  const [formData, setFormData] = useState({
+    total_allowed_entries: 3,
+    tournament_main_banner: '',
+    tournament_start_time: '',
+    tournament_end_time: '',
+    tournament_result_time: ''
+  });
+
+  useEffect(() => {
+    fetchTournament();
+  }, []);
+
+  const fetchTournament = async () => {
     setLoading(true);
     try {
-      const { data, error } = await supabase.from('tournaments').select('*').order('tournament_starting_time', { ascending: false });
-      if (error) throw error;
-      setTournaments(data || []);
-      calculateStats(data || []);
+      // Get current tournament (only one at a time)
+      const { data: tournamentData, error: tournamentError } = await supabase
+        .from('tournament')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (tournamentError) throw tournamentError;
+      
+      setTournament(tournamentData);
+
+      if (tournamentData) {
+        // Get leaderboard for this tournament
+        const { data: leaderboardData, error: leaderboardError } = await supabase
+          .from('leaderboard')
+          .select('*')
+          .eq('tournament_id', tournamentData.id)
+          .order('rank');
+
+        if (leaderboardError) throw leaderboardError;
+        
+        setLeaderboard(leaderboardData || []);
+        calculateStats(tournamentData, leaderboardData || []);
+      } else {
+        setLeaderboard([]);
+        setStats({ totalEntries: 0, totalPlayers: 0, avgScore: 0, topScore: 0 });
+      }
     } catch (err) {
-      console.error('Error fetching tournaments:', err);
+      console.error('Error fetching tournament:', err);
     } finally {
       setLoading(false);
     }
   };
 
-  const calculateStats = (data) => {
-    const s = { total: data.length, upcoming: 0, running: 0, completed: 0, totalPrize: 0, totalParticipants: 0 };
-    data.forEach(t => {
-      if (t.status === 'upcoming' || t.status === 'registration') s.upcoming++;
-      else if (t.status === 'in_progress' || t.status === 'finals') s.running++;
-      else if (t.status === 'completed') s.completed++;
-      s.totalPrize += t.reward_amount || 0;
-      s.totalParticipants += t.current_players || 0;
-    });
-    setStats(s);
+  const calculateStats = (tournamentData, leaderboardData) => {
+    const totalEntries = tournamentData.tournament_entries || 0;
+    const totalPlayers = leaderboardData.length;
+    const scores = leaderboardData.map(p => p.score || 0);
+    const avgScore = scores.length > 0 ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length) : 0;
+    const topScore = scores.length > 0 ? Math.max(...scores) : 0;
+    
+    setStats({ totalEntries, totalPlayers, avgScore, topScore });
   };
 
-  const uploadImage = async (file, type) => {
+  const uploadBanner = async (file) => {
     if (!file) return null;
     
-    setUploading(prev => ({ ...prev, [type]: true }));
+    setUploading(true);
     try {
       const fileExt = file.name.split('.').pop();
-      const fileName = `${type}_${Date.now()}.${fileExt}`;
-      const filePath = `tournament-images/${fileName}`;
+      const fileName = `tournament_banner_${Date.now()}.${fileExt}`;
+      const filePath = `tournament-banners/${fileName}`;
 
       const { error: uploadError } = await supabase.storage
-        .from('tournament-assets')
+        .from('tournament-banners')
         .upload(filePath, file);
 
       if (uploadError) throw uploadError;
 
       const { data: { publicUrl } } = supabase.storage
-        .from('tournament-assets')
+        .from('tournament-banners')
         .getPublicUrl(filePath);
 
       return publicUrl;
     } catch (err) {
-      console.error(`Error uploading ${type}:`, err);
-      alert(`Error uploading ${type}: ${err.message}`);
+      console.error('Error uploading banner:', err);
+      alert('Error uploading banner: ' + err.message);
       return null;
     } finally {
-      setUploading(prev => ({ ...prev, [type]: false }));
+      setUploading(false);
     }
   };
 
-  const handleIconUpload = async (e) => {
+  const handleBannerUpload = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    const url = await uploadImage(file, 'icon');
-    if (url) setFormData(prev => ({ ...prev, tournament_icon: url }));
-  };
-
-  const handleRewardImageUpload = async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const url = await uploadImage(file, 'reward');
-    if (url) setFormData(prev => ({ ...prev, reward_image: url }));
-  };
-
-  const filterTournaments = () => {
-    let filtered = tournaments;
-    if (activeTab === 'upcoming') filtered = tournaments.filter(t => t.status === 'upcoming' || t.status === 'registration');
-    else if (activeTab === 'running') filtered = tournaments.filter(t => t.status === 'in_progress' || t.status === 'finals');
-    else if (activeTab === 'completed') filtered = tournaments.filter(t => t.status === 'completed');
-    if (searchTerm) filtered = filtered.filter(t => t.tournament_name?.toLowerCase().includes(searchTerm.toLowerCase()) || t.tournament_id?.toLowerCase().includes(searchTerm.toLowerCase()));
-    return filtered;
+    const url = await uploadBanner(file);
+    if (url) setFormData(prev => ({ ...prev, tournament_main_banner: url }));
   };
 
   const handleCreate = async () => {
     try {
-      // Auto-determine status based on start time
-      const startTime = new Date(formData.tournament_starting_time);
-      const now = new Date();
-      let autoStatus = 'upcoming';
-      if (startTime <= now) {
-        autoStatus = 'registration'; // Already started, open for registration/instant
+      if (!formData.tournament_start_time || !formData.tournament_end_time || !formData.tournament_result_time) {
+        alert('Please fill in all required fields');
+        return;
       }
 
       const insertData = {
-        tournament_id: formData.tournament_id || `TOURNEY_${Date.now()}`,
-        tournament_name: formData.tournament_name,
-        tournament_icon: formData.tournament_icon || null,
-        reward_type: formData.reward_type,
-        reward_amount: formData.reward_amount,
-        reward_description: formData.reward_description || null,
-        reward_image: formData.reward_image || null,
-        tournament_starting_time: formData.tournament_starting_time,
-        tournament_end_date: formData.tournament_end_date || null,
-        entry_fee: formData.entry_fee,
-        max_players: formData.max_players,
-        status: autoStatus,
-        tournament_state: {
-          room1: { state: 'waiting', roomId: null, players: [], winner: null },
-          room2: { state: 'waiting', roomId: null, players: [], winner: null },
-          room3: { state: 'waiting', roomId: null, players: [], winner: null },
-          room4: { state: 'waiting', roomId: null, players: [], winner: null },
-          semifinalWinners: { room1: null, room2: null, room3: null, room4: null },
-          finalRoom: { state: 'waiting', roomId: null, players: [] },
-          finalWinner: null
-        },
-        registered_players: [],
-        current_players: 0
+        total_allowed_entries: formData.total_allowed_entries,
+        tournament_main_banner: formData.tournament_main_banner || null,
+        tournament_entries: 0,
+        tournament_start_time: formData.tournament_start_time,
+        tournament_end_time: formData.tournament_end_time,
+        tournament_result_time: formData.tournament_result_time
       };
       
-      console.log('Creating tournament with data:', insertData);
+      const { data, error } = await supabase
+        .from('tournament')
+        .insert([insertData])
+        .select();
       
-      const { data, error } = await supabase.from('tournaments').insert([insertData]).select();
+      if (error) throw error;
       
-      if (error) {
-        console.error('Supabase error:', error);
-        throw new Error(error.message || JSON.stringify(error));
-      }
-      
-      console.log('Tournament created:', data);
       setShowCreateModal(false);
       resetForm();
-      fetchTournaments();
+      fetchTournament();
+      alert('Tournament created successfully!');
     } catch (err) {
       console.error('Error creating tournament:', err);
-      alert('Error creating tournament: ' + (err.message || JSON.stringify(err)));
+      alert('Error creating tournament: ' + err.message);
     }
   };
 
   const handleUpdate = async () => {
-    if (!selectedTournament) return;
+    if (!tournament) return;
     try {
-      const { error } = await supabase.from('tournaments').update(formData).eq('id', selectedTournament.id);
+      const { error } = await supabase
+        .from('tournament')
+        .update(formData)
+        .eq('id', tournament.id);
+      
       if (error) throw error;
+      
       setShowEditModal(false);
       resetForm();
-      fetchTournaments();
+      fetchTournament();
+      alert('Tournament updated successfully!');
     } catch (err) {
       console.error('Error updating tournament:', err);
       alert('Error updating tournament: ' + err.message);
     }
   };
 
-  const handleDelete = async (tournament) => {
-    if (!confirm(`Delete tournament "${tournament.tournament_name}"?`)) return;
+  const handleDelete = async () => {
+    if (!tournament || !confirm('Are you sure you want to delete this tournament? This will also delete all leaderboard data.')) return;
+    
     try {
-      const { error } = await supabase.from('tournaments').delete().eq('id', tournament.id);
+      const { error } = await supabase
+        .from('tournament')
+        .delete()
+        .eq('id', tournament.id);
+      
       if (error) throw error;
-      fetchTournaments();
+      
+      fetchTournament();
+      alert('Tournament deleted successfully!');
     } catch (err) {
       console.error('Error deleting tournament:', err);
+      alert('Error deleting tournament: ' + err.message);
     }
   };
 
-  const handleStatusChange = async (tournament, newStatus) => {
-    try {
-      const { error } = await supabase.from('tournaments').update({ status: newStatus }).eq('id', tournament.id);
-      if (error) throw error;
-      fetchTournaments();
-    } catch (err) {
-      console.error('Error updating status:', err);
-    }
-  };
-
-  const fetchParticipants = async (tournament) => {
-    setSelectedTournament(tournament);
-    const playerIds = tournament.registered_players || [];
-    if (playerIds.length === 0) {
-      setParticipants([]);
-      setShowParticipantsModal(true);
-      return;
-    }
-    try {
-      const { data, error } = await supabase.from('users').select('*').in('uid', playerIds);
-      if (error) throw error;
-      setParticipants(data || []);
-    } catch (err) {
-      console.error('Error fetching participants:', err);
-      setParticipants([]);
-    }
-    setShowParticipantsModal(true);
-  };
-
-  const removeParticipant = async (userId) => {
-    if (!selectedTournament || !confirm('Remove this participant?')) return;
-    try {
-      const newPlayers = (selectedTournament.registered_players || []).filter(id => id !== userId);
-      const { error } = await supabase.from('tournaments').update({
-        registered_players: newPlayers,
-        current_players: newPlayers.length
-      }).eq('id', selectedTournament.id);
-      if (error) throw error;
-      fetchParticipants({ ...selectedTournament, registered_players: newPlayers });
-      fetchTournaments();
-    } catch (err) {
-      console.error('Error removing participant:', err);
-    }
-  };
-
-  const openEditModal = (tournament) => {
-    setSelectedTournament(tournament);
+  const openEditModal = () => {
+    if (!tournament) return;
+    
     setFormData({
-      tournament_name: tournament.tournament_name || '',
-      tournament_id: tournament.tournament_id || '',
-      tournament_icon: tournament.tournament_icon || '',
-      reward_type: tournament.reward_type || 'coins',
-      reward_amount: tournament.reward_amount || 0,
-      reward_description: tournament.reward_description || '',
-      reward_image: tournament.reward_image || '',
-      tournament_starting_time: tournament.tournament_starting_time ? new Date(tournament.tournament_starting_time).toISOString().slice(0, 16) : '',
-      tournament_end_date: tournament.tournament_end_date ? new Date(tournament.tournament_end_date).toISOString().slice(0, 16) : '',
-      entry_fee: tournament.entry_fee || 0,
-      max_players: tournament.max_players || 8,
-      status: tournament.status || 'upcoming'
+      total_allowed_entries: tournament.total_allowed_entries || 3,
+      tournament_main_banner: tournament.tournament_main_banner || '',
+      tournament_start_time: tournament.tournament_start_time ? 
+        tournament.tournament_start_time.replace(/[+-]\d{2}:\d{2}$/, '').slice(0, 16) : '',
+      tournament_end_time: tournament.tournament_end_time ? 
+        tournament.tournament_end_time.replace(/[+-]\d{2}:\d{2}$/, '').slice(0, 16) : '',
+      tournament_result_time: tournament.tournament_result_time ? 
+        tournament.tournament_result_time.replace(/[+-]\d{2}:\d{2}$/, '').slice(0, 16) : ''
     });
     setShowEditModal(true);
   };
 
   const resetForm = () => {
     setFormData({
-      tournament_name: '', tournament_id: '', tournament_icon: '', reward_type: 'coins',
-      reward_amount: 0, reward_description: '', reward_image: '', tournament_starting_time: '', tournament_end_date: '', entry_fee: 0, max_players: 8, status: 'upcoming'
+      total_allowed_entries: 3,
+      tournament_main_banner: '',
+      tournament_start_time: '',
+      tournament_end_time: '',
+      tournament_result_time: ''
     });
-    setSelectedTournament(null);
   };
 
-  const exportToCSV = () => {
-    const headers = ['ID', 'Name', 'Status', 'Entry Fee', 'Reward', 'Players', 'Max Players', 'Start Time'];
-    const rows = tournaments.map(t => [t.tournament_id, t.tournament_name, t.status, t.entry_fee, t.reward_amount, t.current_players, t.max_players, t.tournament_starting_time]);
+  const getTournamentStatus = () => {
+    if (!tournament) return 'No Tournament';
+    
+    const now = new Date();
+    // Parse times as local by removing timezone info
+    const startTime = new Date(tournament.tournament_start_time.replace(/[+-]\d{2}:\d{2}$/, ''));
+    const endTime = new Date(tournament.tournament_end_time.replace(/[+-]\d{2}:\d{2}$/, ''));
+    const resultTime = new Date(tournament.tournament_result_time.replace(/[+-]\d{2}:\d{2}$/, ''));
+    
+    if (now < startTime) return 'Upcoming';
+    if (now >= startTime && now < endTime) return 'Active';
+    if (now >= endTime && now < resultTime) return 'Ended';
+    return 'Results Out';
+  };
+
+  const getStatusColor = (status) => {
+    switch (status) {
+      case 'Upcoming': return 'bg-blue-500/20 text-blue-400';
+      case 'Active': return 'bg-green-500/20 text-green-400';
+      case 'Ended': return 'bg-yellow-500/20 text-yellow-400';
+      case 'Results Out': return 'bg-purple-500/20 text-purple-400';
+      default: return 'bg-gray-500/20 text-gray-400';
+    }
+  };
+
+  const formatDateTime = (dateString) => {
+    if (!dateString) return '-';
+    // Parse as local time by removing timezone info
+    const cleanDateString = dateString.replace(/[+-]\d{2}:\d{2}$/, '');
+    return new Date(cleanDateString).toLocaleString();
+  };
+
+  const exportLeaderboardCSV = () => {
+    if (leaderboard.length === 0) {
+      alert('No leaderboard data to export');
+      return;
+    }
+    
+    const headers = ['Rank', 'Player Name', 'Player UID', 'Entries', 'Score'];
+    const rows = leaderboard.map(p => [
+      p.rank || '-',
+      p.player_name || 'Unknown',
+      p.player_uid || '-',
+      p.entries || 0,
+      p.score || 0
+    ]);
+    
     const csv = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `tournaments_${new Date().toISOString().split('T')[0]}.csv`;
+    a.download = `tournament_leaderboard_${new Date().toISOString().split('T')[0]}.csv`;
     a.click();
-  };
-
-  const getStatusColor = (status) => {
-    switch (status) {
-      case 'upcoming': return 'bg-blue-500/20 text-blue-400';
-      case 'registration': return 'bg-yellow-500/20 text-yellow-400';
-      case 'in_progress': return 'bg-green-500/20 text-green-400';
-      case 'finals': return 'bg-purple-500/20 text-purple-400';
-      case 'completed': return 'bg-gray-500/20 text-gray-400';
-      case 'cancelled': return 'bg-red-500/20 text-red-400';
-      default: return 'bg-gray-500/20 text-gray-400';
-    }
   };
 
   return (
@@ -297,353 +276,395 @@ export default function TournamentPage() {
       <div className="flex justify-between items-center mb-6">
         <h1 className="text-2xl font-bold text-white">Tournament Management</h1>
         <div className="flex space-x-3">
-          <button onClick={exportToCSV} className="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg flex items-center">
-            <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
-            Export CSV
-          </button>
-          <button onClick={() => setShowStatsModal(true)} className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg flex items-center">
-            <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" /></svg>
-            Statistics
-          </button>
-          <button onClick={() => { resetForm(); setShowCreateModal(true); }} className="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg flex items-center">
-            <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" /></svg>
-            Create Tournament
-          </button>
+          {tournament && (
+            <>
+              <button 
+                onClick={() => setShowLeaderboardModal(true)} 
+                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg flex items-center"
+              >
+                <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                </svg>
+                View Leaderboard
+              </button>
+              <button 
+                onClick={exportLeaderboardCSV} 
+                className="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg flex items-center"
+              >
+                <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                </svg>
+                Export CSV
+              </button>
+            </>
+          )}
+          {!tournament ? (
+            <button 
+              onClick={() => { resetForm(); setShowCreateModal(true); }} 
+              className="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg flex items-center"
+            >
+              <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+              </svg>
+              Create Tournament
+            </button>
+          ) : (
+            <div className="flex space-x-2">
+              <button 
+                onClick={openEditModal} 
+                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg flex items-center"
+              >
+                <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                </svg>
+                Edit Tournament
+              </button>
+              <button 
+                onClick={handleDelete} 
+                className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg flex items-center"
+              >
+                <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                </svg>
+                Delete Tournament
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
       {/* Stats Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-6 gap-4 mb-6">
-        <div className="bg-gray-800 rounded-xl p-4 border border-gray-700"><p className="text-gray-400 text-sm">Total</p><p className="text-2xl font-bold text-white">{stats.total}</p></div>
-        <div className="bg-gray-800 rounded-xl p-4 border border-gray-700"><p className="text-gray-400 text-sm">Upcoming</p><p className="text-2xl font-bold text-blue-400">{stats.upcoming}</p></div>
-        <div className="bg-gray-800 rounded-xl p-4 border border-gray-700"><p className="text-gray-400 text-sm">Running</p><p className="text-2xl font-bold text-green-400">{stats.running}</p></div>
-        <div className="bg-gray-800 rounded-xl p-4 border border-gray-700"><p className="text-gray-400 text-sm">Completed</p><p className="text-2xl font-bold text-gray-400">{stats.completed}</p></div>
-        <div className="bg-gray-800 rounded-xl p-4 border border-gray-700"><p className="text-gray-400 text-sm">Total Prize</p><p className="text-2xl font-bold text-yellow-400">{stats.totalPrize.toLocaleString()}</p></div>
-        <div className="bg-gray-800 rounded-xl p-4 border border-gray-700"><p className="text-gray-400 text-sm">Participants</p><p className="text-2xl font-bold text-purple-400">{stats.totalParticipants}</p></div>
-      </div>
-
-      {/* Tabs and Search */}
-      <div className="bg-gray-800 rounded-xl border border-gray-700 mb-6">
-        <div className="p-4 border-b border-gray-700 flex justify-between items-center">
-          <div className="flex space-x-2">
-            {['all', 'upcoming', 'running', 'completed'].map(tab => (
-              <button key={tab} onClick={() => setActiveTab(tab)} className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${activeTab === tab ? 'bg-purple-600 text-white' : 'bg-gray-700 text-gray-400 hover:text-white'}`}>
-                {tab.charAt(0).toUpperCase() + tab.slice(1)}
-              </button>
-            ))}
-          </div>
-          <input type="text" placeholder="Search tournaments..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} className="px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 w-64" />
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+        <div className="bg-gray-800 rounded-xl p-4 border border-gray-700">
+          <p className="text-gray-400 text-sm">Total Entries</p>
+          <p className="text-2xl font-bold text-white">{stats.totalEntries.toLocaleString()}</p>
         </div>
-
-        {/* Tournament Table */}
-        {loading ? (
-          <div className="p-8 text-center"><div className="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-purple-500 mx-auto"></div></div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead className="bg-gray-700/50">
-                <tr>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Tournament</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Status</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Entry Fee</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Reward</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Players</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Start Time</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-700">
-                {filterTournaments().map((t) => (
-                  <tr key={t.id} className="hover:bg-gray-700/30">
-                    <td className="px-4 py-4">
-                      <div className="flex items-center">
-                        <div className="w-10 h-10 bg-gradient-to-br from-yellow-500 to-orange-600 rounded-lg flex items-center justify-center overflow-hidden">
-                          {t.tournament_icon ? <img src={t.tournament_icon} alt="" className="w-full h-full object-cover" /> : <span className="text-white text-lg">🏆</span>}
-                        </div>
-                        <div className="ml-3">
-                          <p className="text-white font-medium">{t.tournament_name}</p>
-                          <p className="text-gray-500 text-xs">{t.tournament_id}</p>
-                        </div>
-                      </div>
-                    </td>
-                    <td className="px-4 py-4">
-                      <select value={t.status} onChange={(e) => handleStatusChange(t, e.target.value)} className={`px-2 py-1 rounded text-xs font-medium ${getStatusColor(t.status)} bg-transparent border border-current cursor-pointer`}>
-                        <option value="upcoming">Upcoming</option>
-                        <option value="registration">Registration</option>
-                        <option value="in_progress">In Progress</option>
-                        <option value="finals">Finals</option>
-                        <option value="completed">Completed</option>
-                        <option value="cancelled">Cancelled</option>
-                      </select>
-                    </td>
-                    <td className="px-4 py-4 text-yellow-400 font-medium">{(t.entry_fee || 0).toLocaleString()}</td>
-                    <td className="px-4 py-4">
-                      <div className="flex items-center">
-                        {t.reward_image && <img src={t.reward_image} alt="" className="w-6 h-6 rounded mr-2" />}
-                        <span className="text-green-400 font-medium">{(t.reward_amount || 0).toLocaleString()} {t.reward_type}</span>
-                      </div>
-                    </td>
-                    <td className="px-4 py-4"><button onClick={() => fetchParticipants(t)} className="text-purple-400 hover:text-purple-300">{t.current_players || 0}/{t.max_players || 8}</button></td>
-                    <td className="px-4 py-4 text-gray-400 text-sm">{t.tournament_starting_time ? new Date(t.tournament_starting_time).toLocaleString() : '-'}</td>
-                    <td className="px-4 py-4">
-                      <div className="flex space-x-2">
-                        <button onClick={() => openEditModal(t)} className="p-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg" title="Edit">
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
-                        </button>
-                        <button onClick={() => fetchParticipants(t)} className="p-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg" title="Participants">
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
-                        </button>
-                        <button onClick={() => handleDelete(t)} className="p-2 bg-red-600 hover:bg-red-700 text-white rounded-lg" title="Delete">
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            {filterTournaments().length === 0 && <div className="p-8 text-center text-gray-500">No tournaments found</div>}
-          </div>
-        )}
+        <div className="bg-gray-800 rounded-xl p-4 border border-gray-700">
+          <p className="text-gray-400 text-sm">Total Players</p>
+          <p className="text-2xl font-bold text-blue-400">{stats.totalPlayers}</p>
+        </div>
+        <div className="bg-gray-800 rounded-xl p-4 border border-gray-700">
+          <p className="text-gray-400 text-sm">Average Score</p>
+          <p className="text-2xl font-bold text-green-400">{stats.avgScore}</p>
+        </div>
+        <div className="bg-gray-800 rounded-xl p-4 border border-gray-700">
+          <p className="text-gray-400 text-sm">Top Score</p>
+          <p className="text-2xl font-bold text-yellow-400">{stats.topScore}</p>
+        </div>
       </div>
+
+      {/* Tournament Card */}
+      {loading ? (
+        <div className="bg-gray-800 rounded-xl p-8 text-center border border-gray-700">
+          <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-purple-500 mx-auto"></div>
+        </div>
+      ) : tournament ? (
+        <div className="bg-gray-800 rounded-xl border border-gray-700">
+          {/* Tournament Header */}
+          <div className="p-6 border-b border-gray-700">
+            <div className="flex justify-between items-start">
+              <div className="flex items-center space-x-4">
+                <div className="w-16 h-16 bg-gradient-to-br from-purple-500 to-indigo-600 rounded-xl flex items-center justify-center">
+                  <svg className="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4M7.835 4.697a3.42 3.42 0 001.946-.806 3.42 3.42 0 014.438 0 3.42 3.42 0 001.946.806 3.42 3.42 0 013.138 3.138 3.42 3.42 0 00.806 1.946 3.42 3.42 0 010 4.438 3.42 3.42 0 00-.806 1.946 3.42 3.42 0 01-3.138 3.138 3.42 3.42 0 00-1.946.806 3.42 3.42 0 01-4.438 0 3.42 3.42 0 00-1.946-.806 3.42 3.42 0 01-3.138-3.138 3.42 3.42 0 00-.806-1.946 3.42 3.42 0 010-4.438 3.42 3.42 0 00.806-1.946 3.42 3.42 0 013.138-3.138z" />
+                  </svg>
+                </div>
+                <div>
+                  <h2 className="text-xl font-bold text-white">Active Tournament</h2>
+                  <p className="text-gray-400">ID: {tournament.id}</p>
+                </div>
+              </div>
+              <div className="text-right">
+                <span className={`px-3 py-1 rounded-full text-sm font-medium ${getStatusColor(getTournamentStatus())}`}>
+                  {getTournamentStatus()}
+                </span>
+                <p className="text-gray-400 text-sm mt-1">
+                  Created: {formatDateTime(tournament.created_at)}
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* Tournament Banner */}
+          {tournament.tournament_main_banner && (
+            <div className="p-6 border-b border-gray-700">
+              <h3 className="text-lg font-semibold text-white mb-3">Tournament Banner</h3>
+              <div className="w-full h-48 rounded-lg overflow-hidden">
+                <img 
+                  src={tournament.tournament_main_banner} 
+                  alt="Tournament Banner" 
+                  className="w-full h-full object-cover"
+                />
+              </div>
+            </div>
+          )}
+
+          {/* Tournament Details */}
+          <div className="p-6">
+            <h3 className="text-lg font-semibold text-white mb-4">Tournament Details</h3>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div className="space-y-4">
+                <div>
+                  <p className="text-gray-400 text-sm">Allowed Entries per Player</p>
+                  <p className="text-white font-medium">{tournament.total_allowed_entries}</p>
+                </div>
+                <div>
+                  <p className="text-gray-400 text-sm">Total Games Played</p>
+                  <p className="text-white font-medium">{tournament.tournament_entries}</p>
+                </div>
+                <div>
+                  <p className="text-gray-400 text-sm">Tournament Start Time</p>
+                  <p className="text-white font-medium">{formatDateTime(tournament.tournament_start_time)}</p>
+                </div>
+              </div>
+              <div className="space-y-4">
+                <div>
+                  <p className="text-gray-400 text-sm">Tournament End Time</p>
+                  <p className="text-white font-medium">{formatDateTime(tournament.tournament_end_time)}</p>
+                </div>
+                <div>
+                  <p className="text-gray-400 text-sm">Results Announcement</p>
+                  <p className="text-white font-medium">{formatDateTime(tournament.tournament_result_time)}</p>
+                </div>
+                <div>
+                  <p className="text-gray-400 text-sm">Last Updated</p>
+                  <p className="text-white font-medium">{formatDateTime(tournament.updated_at)}</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className="bg-gray-800 rounded-xl p-12 text-center border border-gray-700">
+          <div className="w-16 h-16 bg-gray-700 rounded-full flex items-center justify-center mx-auto mb-4">
+            <svg className="w-8 h-8 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4M7.835 4.697a3.42 3.42 0 001.946-.806 3.42 3.42 0 014.438 0 3.42 3.42 0 001.946.806 3.42 3.42 0 013.138 3.138 3.42 3.42 0 00.806 1.946 3.42 3.42 0 010 4.438 3.42 3.42 0 00-.806 1.946 3.42 3.42 0 01-3.138 3.138 3.42 3.42 0 00-1.946.806 3.42 3.42 0 01-4.438 0 3.42 3.42 0 00-1.946-.806 3.42 3.42 0 01-3.138-3.138 3.42 3.42 0 00-.806-1.946 3.42 3.42 0 010-4.438 3.42 3.42 0 00.806-1.946 3.42 3.42 0 013.138-3.138z" />
+            </svg>
+          </div>
+          <h2 className="text-xl font-bold text-white mb-2">No Tournament Available</h2>
+          <p className="text-gray-400 mb-6">Create a new tournament to get started. Only one tournament can be active at a time.</p>
+          <button 
+            onClick={() => { resetForm(); setShowCreateModal(true); }} 
+            className="px-6 py-3 bg-purple-600 hover:bg-purple-700 text-white rounded-lg font-medium"
+          >
+            Create Your First Tournament
+          </button>
+        </div>
+      )}
 
       {/* Create/Edit Modal */}
       {(showCreateModal || showEditModal) && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 overflow-y-auto py-8">
-          <div className="bg-gray-800 rounded-xl p-6 w-full max-w-3xl border border-gray-700 m-4">
-            <h3 className="text-xl font-semibold text-white mb-6">{showEditModal ? 'Edit Tournament' : 'Create Tournament'}</h3>
-            <div className="grid grid-cols-2 gap-4">
-              {/* Tournament Name */}
+          <div className="bg-gray-800 rounded-xl p-6 w-full max-w-2xl border border-gray-700 m-4">
+            <h3 className="text-xl font-semibold text-white mb-6">
+              {showEditModal ? 'Edit Tournament' : 'Create New Tournament'}
+            </h3>
+            
+            <div className="space-y-4">
+              {/* Allowed Entries */}
               <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">Tournament Name *</label>
-                <input type="text" value={formData.tournament_name} onChange={(e) => setFormData({ ...formData, tournament_name: e.target.value })}
-                  className="w-full px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-purple-500" placeholder="Weekend Championship" />
+                <label className="block text-sm font-medium text-gray-300 mb-2">
+                  Allowed Entries per Player *
+                </label>
+                <input 
+                  type="number" 
+                  min="1"
+                  max="10"
+                  value={formData.total_allowed_entries} 
+                  onChange={(e) => setFormData({ ...formData, total_allowed_entries: parseInt(e.target.value) || 3 })}
+                  className="w-full px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-purple-500" 
+                  placeholder="3" 
+                />
+                <p className="text-gray-500 text-xs mt-1">How many times each player can participate</p>
               </div>
-              {/* Tournament ID */}
-              <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">Tournament ID</label>
-                <input type="text" value={formData.tournament_id} onChange={(e) => setFormData({ ...formData, tournament_id: e.target.value })}
-                  className="w-full px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-purple-500" placeholder="Auto-generated if empty" />
-              </div>
-              
-              {/* Tournament Icon Upload */}
-              <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">Tournament Icon</label>
-                <div className="flex items-center space-x-3">
-                  <input type="file" ref={iconInputRef} onChange={handleIconUpload} accept="image/*" className="hidden" />
-                  <button onClick={() => iconInputRef.current?.click()} disabled={uploading.icon}
-                    className="px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white hover:bg-gray-600 disabled:opacity-50 flex items-center">
-                    {uploading.icon ? (
-                      <><div className="animate-spin rounded-full h-4 w-4 border-t-2 border-white mr-2"></div>Uploading...</>
-                    ) : (
-                      <><svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>Upload Icon</>
-                    )}
-                  </button>
-                  {formData.tournament_icon && (
-                    <div className="flex items-center">
-                      <img src={formData.tournament_icon} alt="Icon" className="w-10 h-10 rounded-lg object-cover" />
-                      <button onClick={() => setFormData({ ...formData, tournament_icon: '' })} className="ml-2 text-red-400 hover:text-red-300">✕</button>
-                    </div>
-                  )}
-                </div>
-              </div>
-              
-              {/* Start Time */}
-              <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">Start Time *</label>
-                <input type="datetime-local" value={formData.tournament_starting_time} onChange={(e) => setFormData({ ...formData, tournament_starting_time: e.target.value })}
-                  className="w-full px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-purple-500" />
-              </div>
-              
-              {/* End Date */}
-              <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">End Date *</label>
-                <input type="datetime-local" value={formData.tournament_end_date} onChange={(e) => setFormData({ ...formData, tournament_end_date: e.target.value })}
-                  className="w-full px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-purple-500" />
-              </div>
-              
-              {/* Reward Type */}
-              <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">Reward Type</label>
-                <select value={formData.reward_type} onChange={(e) => setFormData({ ...formData, reward_type: e.target.value })}
-                  className="w-full px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-purple-500">
-                  <option value="coins">Coins</option>
-                  <option value="diamonds">Diamonds</option>
-                  <option value="external_gift">External Gift</option>
-                </select>
-              </div>
-              
-              {/* Reward Amount */}
-              <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">Reward Amount</label>
-                <input type="number" value={formData.reward_amount} onChange={(e) => setFormData({ ...formData, reward_amount: parseInt(e.target.value) || 0 })}
-                  className="w-full px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-purple-500" />
-              </div>
-              
-              {/* Reward Image Upload */}
-              <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">Reward Image</label>
-                <div className="flex items-center space-x-3">
-                  <input type="file" ref={rewardInputRef} onChange={handleRewardImageUpload} accept="image/*" className="hidden" />
-                  <button onClick={() => rewardInputRef.current?.click()} disabled={uploading.reward}
-                    className="px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white hover:bg-gray-600 disabled:opacity-50 flex items-center">
-                    {uploading.reward ? (
-                      <><div className="animate-spin rounded-full h-4 w-4 border-t-2 border-white mr-2"></div>Uploading...</>
-                    ) : (
-                      <><svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v13m0-13V6a2 2 0 112 2h-2zm0 0V5.5A2.5 2.5 0 109.5 8H12zm-7 4h14M5 12a2 2 0 110-4h14a2 2 0 110 4M5 12v7a2 2 0 002 2h10a2 2 0 002-2v-7" /></svg>Upload Reward</>
-                    )}
-                  </button>
-                  {formData.reward_image && (
-                    <div className="flex items-center">
-                      <img src={formData.reward_image} alt="Reward" className="w-10 h-10 rounded-lg object-cover" />
-                      <button onClick={() => setFormData({ ...formData, reward_image: '' })} className="ml-2 text-red-400 hover:text-red-300">✕</button>
-                    </div>
-                  )}
-                </div>
-              </div>
-              
-              {/* Entry Fee */}
-              <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">Entry Fee</label>
-                <input type="number" value={formData.entry_fee} onChange={(e) => setFormData({ ...formData, entry_fee: parseInt(e.target.value) || 0 })}
-                  className="w-full px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-purple-500" />
-              </div>
-              
-              {/* Max Players */}
-              <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">Max Players</label>
-                <input type="number" value={formData.max_players} onChange={(e) => setFormData({ ...formData, max_players: parseInt(e.target.value) || 8 })}
-                  className="w-full px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-purple-500" />
-              </div>
-              
-              {showEditModal && (
-                <div>
-                  <label className="block text-sm font-medium text-gray-300 mb-2">Status</label>
-                  <select value={formData.status} onChange={(e) => setFormData({ ...formData, status: e.target.value })}
-                    className="w-full px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-purple-500">
-                    <option value="upcoming">Upcoming</option>
-                    <option value="registration">Registration</option>
-                    <option value="in_progress">In Progress</option>
-                    <option value="finals">Finals</option>
-                    <option value="completed">Completed</option>
-                    <option value="cancelled">Cancelled</option>
-                  </select>
-                </div>
-              )}
-              
-              {formData.reward_type === 'external_gift' && (
-                <div className="col-span-2">
-                  <label className="block text-sm font-medium text-gray-300 mb-2">Reward Description</label>
-                  <textarea value={formData.reward_description} onChange={(e) => setFormData({ ...formData, reward_description: e.target.value })}
-                    className="w-full px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-purple-500" rows={2} placeholder="Describe the prize..." />
-                </div>
-              )}
-            </div>
-            <div className="flex space-x-3 mt-6">
-              <button onClick={() => { setShowCreateModal(false); setShowEditModal(false); resetForm(); }} className="flex-1 px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg">Cancel</button>
-              <button onClick={showEditModal ? handleUpdate : handleCreate} disabled={uploading.icon || uploading.reward} className="flex-1 px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg disabled:opacity-50">
-                {showEditModal ? 'Update' : 'Create'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
-      {/* Participants Modal */}
-      {showParticipantsModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-gray-800 rounded-xl p-6 w-full max-w-2xl border border-gray-700 m-4 max-h-[80vh] overflow-y-auto">
-            <div className="flex justify-between items-center mb-6">
-              <h3 className="text-xl font-semibold text-white">Participants - {selectedTournament?.tournament_name}</h3>
-              <button onClick={() => setShowParticipantsModal(false)} className="text-gray-400 hover:text-white">
-                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
-              </button>
-            </div>
-            {participants.length === 0 ? (
-              <p className="text-gray-400 text-center py-8">No participants registered yet</p>
-            ) : (
-              <div className="space-y-3">
-                {participants.map((p, idx) => (
-                  <div key={p.uid || idx} className="flex items-center justify-between bg-gray-700/50 rounded-lg p-4">
+              {/* Tournament Banner Upload */}
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-2">
+                  Tournament Banner
+                </label>
+                <div className="flex items-center space-x-3">
+                  <input 
+                    type="file" 
+                    ref={bannerInputRef} 
+                    onChange={handleBannerUpload} 
+                    accept="image/*" 
+                    className="hidden" 
+                  />
+                  <button 
+                    onClick={() => bannerInputRef.current?.click()} 
+                    disabled={uploading}
+                    className="px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white hover:bg-gray-600 disabled:opacity-50 flex items-center"
+                  >
+                    {uploading ? (
+                      <>
+                        <div className="animate-spin rounded-full h-4 w-4 border-t-2 border-white mr-2"></div>
+                        Uploading...
+                      </>
+                    ) : (
+                      <>
+                        <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                        </svg>
+                        Upload Banner
+                      </>
+                    )}
+                  </button>
+                  {formData.tournament_main_banner && (
                     <div className="flex items-center">
-                      <div className="w-10 h-10 bg-gradient-to-br from-purple-500 to-indigo-600 rounded-full flex items-center justify-center text-white font-bold">
-                        {p.username?.[0]?.toUpperCase() || '?'}
-                      </div>
-                      <div className="ml-3">
-                        <p className="text-white font-medium">{p.username || 'Unknown'}</p>
-                        <p className="text-gray-500 text-xs">{p.uid?.slice(0, 12)}...</p>
-                      </div>
-                    </div>
-                    <div className="flex items-center space-x-4">
-                      <div className="text-right">
-                        <p className="text-yellow-400 text-sm">{(p.total_coins || 0).toLocaleString()} coins</p>
-                        <p className="text-cyan-400 text-sm">{(p.total_diamonds || 0).toLocaleString()} diamonds</p>
-                      </div>
-                      <button onClick={() => removeParticipant(p.uid)} className="p-2 bg-red-600 hover:bg-red-700 text-white rounded-lg" title="Remove">
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                      <img 
+                        src={formData.tournament_main_banner} 
+                        alt="Banner Preview" 
+                        className="w-16 h-10 rounded-lg object-cover" 
+                      />
+                      <button 
+                        onClick={() => setFormData({ ...formData, tournament_main_banner: '' })} 
+                        className="ml-2 text-red-400 hover:text-red-300"
+                      >
+                        ✕
                       </button>
                     </div>
-                  </div>
-                ))}
+                  )}
+                </div>
+                <p className="text-gray-500 text-xs mt-1">This will be shown in the mobile app</p>
               </div>
-            )}
-            <div className="mt-6 pt-4 border-t border-gray-700">
-              <p className="text-gray-400 text-sm">Total: {participants.length} / {selectedTournament?.max_players || 8} players</p>
+
+              {/* Start Time */}
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-2">
+                  Tournament Start Time *
+                </label>
+                <input 
+                  type="datetime-local" 
+                  value={formData.tournament_start_time} 
+                  onChange={(e) => setFormData({ ...formData, tournament_start_time: e.target.value })}
+                  className="w-full px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-purple-500" 
+                />
+              </div>
+
+              {/* End Time */}
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-2">
+                  Tournament End Time *
+                </label>
+                <input 
+                  type="datetime-local" 
+                  value={formData.tournament_end_time} 
+                  onChange={(e) => setFormData({ ...formData, tournament_end_time: e.target.value })}
+                  className="w-full px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-purple-500" 
+                />
+              </div>
+
+              {/* Result Time */}
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-2">
+                  Results Announcement Time *
+                </label>
+                <input 
+                  type="datetime-local" 
+                  value={formData.tournament_result_time} 
+                  onChange={(e) => setFormData({ ...formData, tournament_result_time: e.target.value })}
+                  className="w-full px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-purple-500" 
+                />
+                <p className="text-gray-500 text-xs mt-1">When final results will be announced</p>
+              </div>
+            </div>
+
+            <div className="flex space-x-3 mt-6">
+              <button 
+                onClick={() => { setShowCreateModal(false); setShowEditModal(false); resetForm(); }} 
+                className="flex-1 px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg"
+              >
+                Cancel
+              </button>
+              <button 
+                onClick={showEditModal ? handleUpdate : handleCreate} 
+                disabled={uploading} 
+                className="flex-1 px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg disabled:opacity-50"
+              >
+                {showEditModal ? 'Update Tournament' : 'Create Tournament'}
+              </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* Statistics Modal */}
-      {showStatsModal && (
+      {/* Leaderboard Modal */}
+      {showLeaderboardModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-gray-800 rounded-xl p-6 w-full max-w-4xl border border-gray-700 m-4 max-h-[80vh] overflow-y-auto">
             <div className="flex justify-between items-center mb-6">
-              <h3 className="text-xl font-semibold text-white">Tournament Statistics</h3>
-              <button onClick={() => setShowStatsModal(false)} className="text-gray-400 hover:text-white">
-                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+              <h3 className="text-xl font-semibold text-white">Tournament Leaderboard</h3>
+              <button 
+                onClick={() => setShowLeaderboardModal(false)} 
+                className="text-gray-400 hover:text-white"
+              >
+                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
               </button>
             </div>
-            <div className="grid grid-cols-3 gap-4 mb-6">
-              <div className="bg-gray-700/50 rounded-lg p-4 text-center">
-                <p className="text-3xl font-bold text-white">{stats.total}</p>
-                <p className="text-gray-400 text-sm">Total Tournaments</p>
+            
+            {leaderboard.length === 0 ? (
+              <p className="text-gray-400 text-center py-8">No players have participated yet</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full">
+                  <thead className="bg-gray-700/50">
+                    <tr>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Rank</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Player</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Entries</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Score</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-700">
+                    {leaderboard.map((player, index) => (
+                      <tr key={player.id || index} className="hover:bg-gray-700/30">
+                        <td className="px-4 py-4">
+                          <div className="flex items-center">
+                            {player.rank <= 3 ? (
+                              <div className={`w-8 h-8 rounded-full flex items-center justify-center text-white font-bold ${
+                                player.rank === 1 ? 'bg-yellow-500' : 
+                                player.rank === 2 ? 'bg-gray-400' : 'bg-orange-600'
+                              }`}>
+                                {player.rank}
+                              </div>
+                            ) : (
+                              <span className="text-white font-medium">{player.rank || '-'}</span>
+                            )}
+                          </div>
+                        </td>
+                        <td className="px-4 py-4">
+                          <div className="flex items-center">
+                            <div className="w-10 h-10 bg-gradient-to-br from-purple-500 to-indigo-600 rounded-full flex items-center justify-center text-white font-bold">
+                              {(player.player_name || 'U')[0].toUpperCase()}
+                            </div>
+                            <div className="ml-3">
+                              <p className="text-white font-medium">{player.player_name || 'Unknown'}</p>
+                              <p className="text-gray-500 text-xs">{player.player_uid?.slice(0, 12)}...</p>
+                            </div>
+                          </div>
+                        </td>
+                        <td className="px-4 py-4 text-blue-400 font-medium">{player.entries || 0}</td>
+                        <td className="px-4 py-4 text-green-400 font-bold text-lg">{player.score || 0}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
-              <div className="bg-gray-700/50 rounded-lg p-4 text-center">
-                <p className="text-3xl font-bold text-yellow-400">{stats.totalPrize.toLocaleString()}</p>
-                <p className="text-gray-400 text-sm">Total Prize Pool</p>
-              </div>
-              <div className="bg-gray-700/50 rounded-lg p-4 text-center">
-                <p className="text-3xl font-bold text-purple-400">{stats.totalParticipants}</p>
-                <p className="text-gray-400 text-sm">Total Participants</p>
-              </div>
-            </div>
-            <div className="bg-gray-700/50 rounded-lg p-4 mb-6">
-              <h4 className="text-white font-medium mb-4">Status Distribution</h4>
-              <div className="flex h-8 rounded-lg overflow-hidden">
-                {stats.upcoming > 0 && <div className="bg-blue-500" style={{ width: `${(stats.upcoming / stats.total) * 100}%` }}></div>}
-                {stats.running > 0 && <div className="bg-green-500" style={{ width: `${(stats.running / stats.total) * 100}%` }}></div>}
-                {stats.completed > 0 && <div className="bg-gray-500" style={{ width: `${(stats.completed / stats.total) * 100}%` }}></div>}
-              </div>
-              <div className="flex justify-between mt-2 text-sm">
-                <span className="text-blue-400">Upcoming: {stats.upcoming}</span>
-                <span className="text-green-400">Running: {stats.running}</span>
-                <span className="text-gray-400">Completed: {stats.completed}</span>
-              </div>
-            </div>
-            <div className="bg-gray-700/50 rounded-lg p-4">
-              <h4 className="text-white font-medium mb-4">Recent Completed Tournaments</h4>
-              <div className="space-y-2">
-                {tournaments.filter(t => t.status === 'completed').slice(0, 5).map(t => (
-                  <div key={t.id} className="flex justify-between items-center py-2 border-b border-gray-600 last:border-0">
-                    <span className="text-white">{t.tournament_name}</span>
-                    <span className="text-yellow-400">{(t.reward_amount || 0).toLocaleString()} {t.reward_type}</span>
-                  </div>
-                ))}
-                {tournaments.filter(t => t.status === 'completed').length === 0 && (
-                  <p className="text-gray-500 text-center py-4">No completed tournaments yet</p>
-                )}
-              </div>
+            )}
+            
+            <div className="mt-6 pt-4 border-t border-gray-700 flex justify-between items-center">
+              <p className="text-gray-400 text-sm">
+                Total Players: {leaderboard.length} | Total Entries: {stats.totalEntries}
+              </p>
+              <button 
+                onClick={exportLeaderboardCSV}
+                className="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-sm"
+              >
+                Export CSV
+              </button>
             </div>
           </div>
         </div>
